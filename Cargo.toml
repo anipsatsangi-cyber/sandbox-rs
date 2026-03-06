@@ -11,13 +11,13 @@ repository = "https://github.com/ErickJ3/sandbox-rs"
 homepage = "https://github.com/ErickJ3/sandbox-rs"
 
 [workspace.dependencies]
-sandbox-core = { path = "crates/sandbox-core" }
-sandbox-seccomp = { path = "crates/sandbox-seccomp" }
-sandbox-namespace = { path = "crates/sandbox-namespace" }
-sandbox-landlock = { path = "crates/sandbox-landlock" }
-sandbox-cgroup = { path = "crates/sandbox-cgroup" }
-sandbox-fs = { path = "crates/sandbox-fs" }
-sandbox-rs = { path = "crates/sandbox-rs" }
+sandbox-core = { version = "0.2.0", path = "crates/sandbox-core" }
+sandbox-seccomp = { version = "0.2.0", path = "crates/sandbox-seccomp" }
+sandbox-namespace = { version = "0.2.0", path = "crates/sandbox-namespace" }
+sandbox-landlock = { version = "0.2.0", path = "crates/sandbox-landlock" }
+sandbox-cgroup = { version = "0.2.0", path = "crates/sandbox-cgroup" }
+sandbox-fs = { version = "0.2.0", path = "crates/sandbox-fs" }
+sandbox-rs = { version = "0.2.0", path = "crates/sandbox-rs" }
 
 nix = { version = "0.31", features = ["process", "sched", "mount", "resource", "signal", "fs"] }
 libc = "0.2.0"
