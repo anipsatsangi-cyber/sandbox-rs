@@ -9,7 +9,7 @@
 ![Rust](https://img.shields.io/badge/rust-1.91%2B-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-## Things
+## Features
 
 - **Unprivileged mode** — works without root via user namespaces, Landlock, and setrlimit
 - **Privileged mode** — full isolation with cgroups v2, chroot, and all namespace types
@@ -30,7 +30,7 @@
 
 ```toml
 [dependencies]
-sandbox-rs = "0.1"
+sandbox-rs = "0.2"
 ```
 
 ```rust
