@@ -13,18 +13,23 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use sandbox_rs::SandboxBuilder;
+//! ```no_run
+//! use sandbox_rs::{SandboxBuilder, SeccompProfile, PrivilegeMode};
 //! use std::time::Duration;
 //!
-//! let mut sandbox = SandboxBuilder::new("my-sandbox")
-//!     .memory_limit_str("256M")?
-//!     .cpu_limit_percent(50)
-//!     .timeout(Duration::from_secs(30))
-//!     .build()?;
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let mut sandbox = SandboxBuilder::new("my-sandbox")
+//!         .privilege_mode(PrivilegeMode::Unprivileged)
+//!         .memory_limit_str("256M")?
+//!         .cpu_limit_percent(50)
+//!         .timeout(Duration::from_secs(30))
+//!         .seccomp_profile(SeccompProfile::IoHeavy)
+//!         .build()?;
 //!
-//! let result = sandbox.run("/bin/echo", &["hello world"])?;
-//! println!("Exit code: {}", result.exit_code);
+//!     let result = sandbox.run("/bin/echo", &["hello world"])?;
+//!     println!("exit={} mem={}B cpu={}μs", result.exit_code, result.memory_peak, result.cpu_time_us);
+//!     Ok(())
+//! }
 //! ```
 
 pub mod controller;
