@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox-cgroup"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "log",
@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "log",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox-ctl"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "console",
@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox-fs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "sandbox-core",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox-landlock"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "log",
@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox-namespace"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "log",
@@ -448,7 +448,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox-rs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox-seccomp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "log",
