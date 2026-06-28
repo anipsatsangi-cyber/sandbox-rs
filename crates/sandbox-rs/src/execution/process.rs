@@ -376,7 +376,9 @@ impl ProcessExecutor {
                     )
                 };
                 if ret != 0 {
-                    eprintln!("bind mount {} -> {} failed", sys_path, dest);
+                    // eprintln!("bind mount {} -> {} failed", sys_path, dest);
+                    let err = std::io::Error::last_os_error();
+                    eprintln!("bind mount {} -> {} failed: {} (errno {})", sys_path, dest, err, err.raw_os_error().unwrap_or(0));
                 }
             }
  
