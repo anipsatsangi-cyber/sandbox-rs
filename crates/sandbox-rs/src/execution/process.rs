@@ -352,12 +352,38 @@ impl ProcessExecutor {
             return 1;
         }
 
-        // 2. Change root if specified (no root check - fails explicitly if unprivileged)
-        if let Some(chroot_path) = &chroot_dir
-            && let Err(e) = chroot(chroot_path.as_str())
-        {
-            eprintln!("chroot failed: {}", e);
-            return 1;
+        // 2. Change root if specified
+        //    Bind-mount system paths into the chroot dir first, then chroot.
+        //    The child has CAP_SYS_ADMIN in the user namespace + mount namespace,
+        //    so bind mounts only affect this namespace (not the host).
+        if let Some(chroot_path) = &chroot_dir {
+            let system_paths = [
+                "/usr", "/lib", "/lib64", "/bin", "/sbin",
+                "/etc", "/dev", "/proc", "/sys", "/tmp",
+            ];
+            for sys_path in system_paths {
+                let dest = format!("{}{}", chroot_path, sys_path);
+                let _ = std::fs::create_dir_all(&dest);
+                let src = CString::new(*sys_path).unwrap();
+                let dst = CString::new(dest.as_str()).unwrap();
+                let ret = unsafe {
+                    libc::mount(
+                        src.as_ptr(),
+                        dst.as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_BIND | libc::MS_REC,
+                        std::ptr::null(),
+                    )
+                };
+                if ret != 0 {
+                    eprintln!("bind mount {} -> {} failed", sys_path, dest);
+                }
+            }
+ 
+            if let Err(e) = chroot(chroot_path.as_str()) {
+                eprintln!("chroot failed: {}", e);
+                return 1;
+            }
         }
 
         // 3. Change directory
