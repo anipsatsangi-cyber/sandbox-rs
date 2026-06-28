@@ -307,7 +307,7 @@ impl Sandbox {
             args: Vec::new(),       // filled in by caller
             env: Vec::new(),
             cwd: None,
-            chroot_dir: None,
+            chroot_dir: self.config.root.clone(),
             uid: None,
             gid: None,
             seccomp: Some(SeccompFilter::from_profile(
