@@ -50,6 +50,10 @@ pub struct ProcessConfig {
     pub inherit_env: bool,
     /// Whether to set up user namespace UID/GID mapping
     pub use_user_namespace: bool,
+    /// Host UID to map inside user namespace (None = use current process uid)
+    pub host_uid: Option<u32>,
+    /// Host GID to map inside user namespace (None = use current process gid)
+    pub host_gid: Option<u32>,    
 }
 
 impl Default for ProcessConfig {
@@ -66,6 +70,8 @@ impl Default for ProcessConfig {
             rlimits: None,
             inherit_env: true,
             use_user_namespace: false,
+            host_uid: None,
+            host_gid: None,
         }
     }
 }
@@ -151,6 +157,8 @@ impl ProcessExecutor {
         child_stack: &mut [u8],
         namespace_config: &NamespaceConfig,
         use_user_namespace: bool,
+        host_uid: Option<u32>,
+        host_gid: Option<u32>,        
     ) -> Result<Pid> {
         let flags = namespace_config.to_clone_flags();
 
@@ -184,8 +192,8 @@ impl ProcessExecutor {
             match result {
                 Ok(child_pid) => {
                     // Write UID/GID mapping for the child's user namespace
-                    let uid = sandbox_core::util::get_uid();
-                    let gid = sandbox_core::util::get_gid();
+                    let uid = host_uid.unwrap_or_else(|| sandbox_core::util::get_uid());
+                    let gid = host_gid.unwrap_or_else(|| sandbox_core::util::get_gid());
                     if let Err(e) =
                         sandbox_namespace::user_ns::setup_user_namespace(child_pid, uid, gid)
                     {
@@ -224,6 +232,8 @@ impl ProcessExecutor {
 
         config.prepare_environment();
         let use_user_ns = config.use_user_namespace;
+        let host_uid = config.host_uid;
+        let host_gid = config.host_gid;        
 
         // Move config into closure (fixes memory leak from Box::into_raw pattern)
         let mut child_config = Some(config);
@@ -233,6 +243,8 @@ impl ProcessExecutor {
             &mut child_stack,
             &namespace_config,
             use_user_ns,
+            host_uid,
+            host_gid,            
         )?;
 
         let start = std::time::Instant::now();
@@ -267,6 +279,8 @@ impl ProcessExecutor {
 
         config.prepare_environment();
         let use_user_ns = config.use_user_namespace;
+        let host_uid = config.host_uid;
+        let host_gid = config.host_gid;        
         let stdout_write_fd = stdout_write.as_raw_fd();
         let stderr_write_fd = stderr_write.as_raw_fd();
 
@@ -283,6 +297,8 @@ impl ProcessExecutor {
             &mut child_stack,
             &namespace_config,
             use_user_ns,
+            host_uid,
+            host_gid,
         )?;
 
         // Parent: close write ends (child has copies via clone)
@@ -342,6 +358,8 @@ impl ProcessExecutor {
             rlimits,
             inherit_env: _,
             use_user_namespace: _,
+            host_uid: _,
+            host_gid: _,
         } = config;
 
         // 1. Apply resource limits (before seccomp, which may restrict setrlimit)
