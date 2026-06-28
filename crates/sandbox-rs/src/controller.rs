@@ -41,6 +41,10 @@ pub struct SandboxConfig {
     pub id: String,
     /// Privilege mode
     pub privilege_mode: PrivilegeMode,
+    /// Host UID to map inside user namespace (None = use current process uid)
+    pub host_uid: Option<u32>,
+    /// Host GID to map inside user namespace (None = use current process gid)
+    pub host_gid: Option<u32>,
 }
 
 impl Default for SandboxConfig {
@@ -56,6 +60,8 @@ impl Default for SandboxConfig {
             timeout: None,
             id: "default".to_string(),
             privilege_mode: PrivilegeMode::Auto,
+            host_uid: None,
+            host_gid: None,
         }
     }
 }
@@ -185,7 +191,19 @@ impl SandboxBuilder {
         self.config.privilege_mode = mode;
         self
     }
-
+    
+    /// Set host UID for user namespace mapping (cross-user isolation)
+    pub fn host_uid(mut self, uid: u32) -> Self {
+        self.config.host_uid = Some(uid);
+        self
+    }
+ 
+    /// Set host GID for user namespace mapping
+    pub fn host_gid(mut self, gid: u32) -> Self {
+        self.config.host_gid = Some(gid);
+        self
+    }
+    
     /// Build sandbox
     pub fn build(self) -> Result<Sandbox> {
         self.config.validate()?;
@@ -307,7 +325,7 @@ impl Sandbox {
             args: Vec::new(),       // filled in by caller
             env: Vec::new(),
             cwd: None,
-            chroot_dir: Some(self.config.root.to_string_lossy().into_owned()),
+            chroot_dir: None,
             uid: None,
             gid: None,
             seccomp: Some(SeccompFilter::from_profile(
@@ -320,6 +338,8 @@ impl Sandbox {
             },
             inherit_env: true,
             use_user_namespace: self.config.namespace_config.user,
+            host_uid: self.config.host_uid,
+            host_gid: self.config.host_gid,            
         }
     }
 
