@@ -364,7 +364,7 @@ impl ProcessExecutor {
             for sys_path in system_paths {
                 let dest = format!("{}{}", chroot_path, sys_path);
                 let _ = std::fs::create_dir_all(&dest);
-                let src = CString::new(*sys_path).unwrap();
+                let src = CString::new(sys_path).unwrap();
                 let dst = CString::new(dest.as_str()).unwrap();
                 let ret = unsafe {
                     libc::mount(
