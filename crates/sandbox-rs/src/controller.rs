@@ -358,14 +358,26 @@ impl Sandbox {
     }
 
     /// Setup cgroup for privileged mode, returns memory/cpu usage reader
+    /// Setup cgroup for privileged mode, returns memory/cpu usage reader
     fn setup_cgroup(&mut self) -> Result<()> {
         if self.resolved_mode.is_unprivileged() {
             return Ok(());
         }
-
+ 
         let cgroup_name = format!("sandbox-{}", self.config.id);
-        let cgroup = Cgroup::new(&cgroup_name, Pid::from_raw(std::process::id() as i32))?;
-
+        let cgroup = match Cgroup::new(&cgroup_name, Pid::from_raw(std::process::id() as i32)) {
+            Ok(cg) => cg,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("Read-only file system") || msg.contains("os error 30") {
+                    // Docker Swarm cgroup2 is read-only.
+                    // Container-level limits are already enforced by Docker.
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
+ 
         let cgroup_config = CgroupConfig {
             memory_limit: self.config.memory_limit,
             cpu_quota: self.config.cpu_quota,
@@ -373,10 +385,38 @@ impl Sandbox {
             max_pids: self.config.max_pids,
             cpu_weight: None,
         };
-        cgroup.apply_config(&cgroup_config)?;
+ 
+        if let Err(e) = cgroup.apply_config(&cgroup_config) {
+            let msg = e.to_string();
+            if msg.contains("Read-only file system") || msg.contains("os error 30") {
+                return Ok(());
+            }
+            return Err(e);
+        }
+ 
         self.cgroup = Some(cgroup);
         Ok(())
     }
+    
+    // fn setup_cgroup(&mut self) -> Result<()> {
+    //     if self.resolved_mode.is_unprivileged() {
+    //         return Ok(());
+    //     }
+
+    //     let cgroup_name = format!("sandbox-{}", self.config.id);
+    //     let cgroup = Cgroup::new(&cgroup_name, Pid::from_raw(std::process::id() as i32))?;
+
+    //     let cgroup_config = CgroupConfig {
+    //         memory_limit: self.config.memory_limit,
+    //         cpu_quota: self.config.cpu_quota,
+    //         cpu_period: self.config.cpu_period,
+    //         max_pids: self.config.max_pids,
+    //         cpu_weight: None,
+    //     };
+    //     cgroup.apply_config(&cgroup_config)?;
+    //     self.cgroup = Some(cgroup);
+    //     Ok(())
+    // }
 
     /// Run program in sandbox
     pub fn run(&mut self, program: &str, args: &[&str]) -> Result<SandboxResult> {
