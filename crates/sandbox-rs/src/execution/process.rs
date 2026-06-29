@@ -242,6 +242,7 @@ impl ProcessExecutor {
                     drop(sync_read);
                     Err(SandboxError::Syscall(format!("clone failed: {}", e)))
                 }
+            }
         
 
         // if use_user_namespace && namespace_config.user {
