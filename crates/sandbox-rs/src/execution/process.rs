@@ -4,7 +4,7 @@
 //! - Stack size: 128KB (was 8KB)
 //! - Memory leak fix: clone config into closure instead of Box::into_raw
 //! - Seccomp: NO root check (seccomp only needs PR_SET_NO_NEW_PRIVS)
-//! - User namespace: sync pipe for UID/GID mapping from parent
+//! -  User namespace: child self-writes UID/GID mapping (nested userns compatible)
 //! - Resource limits: applies RlimitConfig in child before execve
 
 use sandbox_cgroup::RlimitConfig;
@@ -12,7 +12,7 @@ use sandbox_core::{Result, SandboxError};
 use sandbox_namespace::NamespaceConfig;
 use sandbox_seccomp::{SeccompBpf, SeccompFilter};
 
-use log::warn;
+// use log::warn;
 use nix::sched::clone;
 use nix::sys::signal::Signal;
 use nix::unistd::{AccessFlags, Pid, access, chdir, chroot, execve};
@@ -161,60 +161,142 @@ impl ProcessExecutor {
         host_gid: Option<u32>,        
     ) -> Result<Pid> {
         let flags = namespace_config.to_clone_flags();
-
         if use_user_namespace && namespace_config.user {
-            // Create sync pipe for parent→child signaling
+            // Compute uid/gid before the closure takes ownership
+            let uid = host_uid.unwrap_or_else(|| sandbox_core::util::get_uid());
+            let gid = host_gid.unwrap_or_else(|| sandbox_core::util::get_gid());
+ 
+            // Create sync pipe for child→parent signaling
             let (sync_read, sync_write) =
                 nix::unistd::pipe().map_err(|e| SandboxError::Syscall(format!("pipe: {}", e)))?;
             let sync_read_raw = sync_read.as_raw_fd();
             let sync_write_raw = sync_write.as_raw_fd();
-
-            // Wrap the child function to wait for parent's user namespace setup
+ 
+            // Wrap the child function: child self-writes uid_map/gid_map,
+            // then signals parent before proceeding with child_setup
             let wrapped = Box::new(move || -> isize {
                 // SAFETY: raw FD operations in child process after clone
                 unsafe {
-                    // Close child's copy of the write end
-                    libc::close(sync_write_raw);
-                    // Wait for parent to signal (parent writes 1 byte after uid_map setup)
-                    let mut buf = [0u8; 1];
-                    libc::read(sync_read_raw, buf.as_mut_ptr() as *mut libc::c_void, 1);
+                    // Close child's copy of the read end (not needed)
                     libc::close(sync_read_raw);
                 }
+ 
+                // Write setgroups(deny) ,  must happen before uid_map write
+                if let Err(e) = std::fs::write("/proc/self/setgroups", "deny") {
+                    eprintln!("child setgroups failed: {}", e);
+                    unsafe { libc::close(sync_write_raw); }
+                    return 1;
+                }
+ 
+                // Write uid_map: map host_uid → 0 inside this namespace
+                let uid_map = format!("0 {} 1\n", uid);
+                if let Err(e) = std::fs::write("/proc/self/uid_map", &uid_map) {
+                    eprintln!("child uid_map write failed: {}", e);
+                    unsafe { libc::close(sync_write_raw); }
+                    return 1;
+                }
+ 
+                // Write gid_map: map host_gid → 0 inside this namespace
+                let gid_map = format!("0 {} 1\n", gid);
+                if let Err(e) = std::fs::write("/proc/self/gid_map", &gid_map) {
+                    eprintln!("child gid_map write failed: {}", e);
+                    unsafe { libc::close(sync_write_raw); }
+                    return 1;
+                }
+ 
+                // Signal parent that mapping is complete
+                unsafe {
+                    let signal_byte: [u8; 1] = [1];
+                    libc::write(
+                        sync_write_raw,
+                        signal_byte.as_ptr() as *const libc::c_void,
+                        1,
+                    );
+                    libc::close(sync_write_raw);
+                }
+ 
                 child_fn()
             });
-
+ 
             let result =
                 unsafe { clone(wrapped, child_stack, flags, Some(Signal::SIGCHLD as i32)) };
-
-            // Parent: close our copy of the read end
-            drop(sync_read);
-
+ 
+            // Parent: close our copy of the write end
+            drop(sync_write);
+ 
             match result {
                 Ok(child_pid) => {
-                    // Write UID/GID mapping for the child's user namespace
-                    let uid = host_uid.unwrap_or_else(|| sandbox_core::util::get_uid());
-                    let gid = host_gid.unwrap_or_else(|| sandbox_core::util::get_gid());
-                    if let Err(e) =
-                        sandbox_namespace::user_ns::setup_user_namespace(child_pid, uid, gid)
-                    {
-                        warn!("User namespace setup failed: {}", e);
-                    }
-
-                    // Signal child to proceed
-                    // SAFETY: sync_write is a valid FD, writing 1 byte
+                    // Parent waits for child to signal mapping is done
                     unsafe {
-                        let signal_byte: [u8; 1] = [1];
-                        libc::write(
-                            sync_write.as_raw_fd(),
-                            signal_byte.as_ptr() as *const libc::c_void,
+                        let mut buf = [0u8; 1];
+                        libc::read(
+                            sync_read.as_raw_fd(),
+                            buf.as_mut_ptr() as *mut libc::c_void,
                             1,
                         );
                     }
-                    drop(sync_write);
+                    drop(sync_read);
                     Ok(child_pid)
                 }
-                Err(e) => Err(SandboxError::Syscall(format!("clone failed: {}", e))),
-            }
+                Err(e) => {
+                    drop(sync_read);
+                    Err(SandboxError::Syscall(format!("clone failed: {}", e)))
+                }
+        
+
+        // if use_user_namespace && namespace_config.user {
+        //     // Create sync pipe for parent→child signaling
+        //     let (sync_read, sync_write) =
+        //         nix::unistd::pipe().map_err(|e| SandboxError::Syscall(format!("pipe: {}", e)))?;
+        //     let sync_read_raw = sync_read.as_raw_fd();
+        //     let sync_write_raw = sync_write.as_raw_fd();
+
+        //     // Wrap the child function to wait for parent's user namespace setup
+        //     let wrapped = Box::new(move || -> isize {
+        //         // SAFETY: raw FD operations in child process after clone
+        //         unsafe {
+        //             // Close child's copy of the write end
+        //             libc::close(sync_write_raw);
+        //             // Wait for parent to signal (parent writes 1 byte after uid_map setup)
+        //             let mut buf = [0u8; 1];
+        //             libc::read(sync_read_raw, buf.as_mut_ptr() as *mut libc::c_void, 1);
+        //             libc::close(sync_read_raw);
+        //         }
+        //         child_fn()
+        //     });
+
+        //     let result =
+        //         unsafe { clone(wrapped, child_stack, flags, Some(Signal::SIGCHLD as i32)) };
+
+        //     // Parent: close our copy of the read end
+        //     drop(sync_read);
+
+        //     match result {
+        //         Ok(child_pid) => {
+        //             // Write UID/GID mapping for the child's user namespace
+        //             let uid = host_uid.unwrap_or_else(|| sandbox_core::util::get_uid());
+        //             let gid = host_gid.unwrap_or_else(|| sandbox_core::util::get_gid());
+        //             if let Err(e) =
+        //                 sandbox_namespace::user_ns::setup_user_namespace(child_pid, uid, gid)
+        //             {
+        //                 warn!("User namespace setup failed: {}", e);
+        //             }
+
+        //             // Signal child to proceed
+        //             // SAFETY: sync_write is a valid FD, writing 1 byte
+        //             unsafe {
+        //                 let signal_byte: [u8; 1] = [1];
+        //                 libc::write(
+        //                     sync_write.as_raw_fd(),
+        //                     signal_byte.as_ptr() as *const libc::c_void,
+        //                     1,
+        //                 );
+        //             }
+        //             drop(sync_write);
+        //             Ok(child_pid)
+        //         }
+        //         Err(e) => Err(SandboxError::Syscall(format!("clone failed: {}", e))),
+        //     }
         } else {
             // No user namespace - clone directly
             let result =
