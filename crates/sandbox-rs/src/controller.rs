@@ -276,10 +276,10 @@ impl Sandbox {
 
         // Adjust namespace config based on resolved mode
         let mut config = config;
-        if resolved_mode.is_unprivileged() && !config.namespace_config.user {
-            // Force user namespace on for unprivileged mode
-            config.namespace_config.user = true;
-        }
+        // if resolved_mode.is_unprivileged() && !config.namespace_config.user {
+        //     // Force user namespace on for unprivileged mode
+        //     config.namespace_config.user = true;
+        // }
 
         // Create root directory
         fs::create_dir_all(&config.root).map_err(|e| {
