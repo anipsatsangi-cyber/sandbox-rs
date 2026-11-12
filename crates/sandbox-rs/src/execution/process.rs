@@ -19,11 +19,79 @@ use nix::unistd::{AccessFlags, Pid, access, chdir, chroot, execve};
 use std::ffi::CString;
 use std::mem;
 use std::os::fd::IntoRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 
 use crate::execution::stream::{ProcessStream, spawn_fd_reader};
+
+/// What a mount plan entry mounts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MountSource {
+    /// Bind an existing host path (file or directory) into the sandbox, so
+    /// the child sees the host tree at `MountSpec::target`.
+    Bind(PathBuf),
+    /// An empty tmpfs at the target, masking whatever the sandbox root
+    /// already holds there (e.g. clearing a directory of sibling entries).
+    Tmpfs,
+}
+
+/// One ordered mount the sandbox applies inside its private mount
+/// namespace, before chroot. Targets are absolute paths INSIDE the sandbox
+/// root; they are prefixed with the chroot directory internally.
+///
+/// Entries apply in the order given: a caller mounts a masking tmpfs before
+/// the binds that repopulate it. Sources are opened before any mount runs,
+/// so a masking mount cannot change what a later bind resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountSpec {
+    pub source: MountSource,
+    /// Absolute path inside the sandbox root, e.g. "/collections/acme".
+    pub target: String,
+    /// Remount the bind read-only (the bind itself is always created
+    /// read-write first; the kernel cannot strengthen a mount otherwise).
+    pub read_only: bool,
+}
+
+impl MountSpec {
+    /// Validate the shape. Source EXISTENCE is checked when the child applies
+    /// the plan (it may live outside this build host's view).
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !self.target.starts_with('/') {
+            return Err(format!("mount target must be absolute: {}", self.target));
+        }
+        if self.target == "/" {
+            return Err("mount target cannot be the sandbox root".to_string());
+        }
+        if self
+            .target
+            .split('/')
+            .any(|component| component == ".." || component == ".")
+        {
+            return Err(format!("mount target must not contain dot components: {}", self.target));
+        }
+        match &self.source {
+            MountSource::Bind(path) => {
+                if !path.is_absolute() {
+                    return Err(format!(
+                        "bind source must be an absolute host path: {}",
+                        path.display()
+                    ));
+                }
+            }
+            MountSource::Tmpfs => {
+                if self.read_only {
+                    return Err(
+                        "a tmpfs mount cannot be read-only remounted; tmpfs is writable by construction"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Process execution configuration
 #[derive(Debug, Clone)]
@@ -53,7 +121,10 @@ pub struct ProcessConfig {
     /// Host UID to map inside user namespace (None = use current process uid)
     pub host_uid: Option<u32>,
     /// Host GID to map inside user namespace (None = use current process gid)
-    pub host_gid: Option<u32>,    
+    pub host_gid: Option<u32>,
+    /// Ordered mount plan applied inside the private mount namespace, before
+    /// chroot. Empty keeps the historical behavior (system paths only).
+    pub mounts: Vec<MountSpec>,
 }
 
 impl Default for ProcessConfig {
@@ -72,6 +143,7 @@ impl Default for ProcessConfig {
             use_user_namespace: false,
             host_uid: None,
             host_gid: None,
+            mounts: Vec::new(),
         }
     }
 }
@@ -443,6 +515,7 @@ impl ProcessExecutor {
             use_user_namespace: _,
             host_uid: _,
             host_gid: _,
+            mounts,
         } = config;
 
         // 1. Apply resource limits (before seccomp, which may restrict setrlimit)
@@ -482,7 +555,17 @@ impl ProcessExecutor {
                     eprintln!("bind mount {} -> {} failed: {} (errno {})", sys_path, dest, err, err.raw_os_error().unwrap_or(0));
                 }
             }
- 
+
+            // 2b. Apply the caller's ordered mount plan. A mount failure is
+            //     FATAL: running with a partial view could expose siblings the
+            //     caller meant to mask. An empty plan changes nothing.
+            if !mounts.is_empty()
+                && let Err(e) = apply_mounts(chroot_path, &mounts)
+            {
+                eprintln!("mount plan failed: {}", e);
+                return 1;
+            }
+
             if let Err(e) = chroot(chroot_path.as_str()) {
                 eprintln!("chroot failed: {}", e);
                 return 1;
@@ -581,6 +664,157 @@ impl ProcessExecutor {
     }
 }
 
+/// Apply the caller's ordered mount plan in the child, before chroot.
+///
+/// Targets are sandbox-absolute; each is prefixed with the chroot directory.
+/// All bind sources are opened BEFORE any mount runs, so a masking tmpfs at
+/// an earlier entry cannot change what a later bind resolves to. The mount
+/// namespace is made private first — a shared parent namespace would receive
+/// these mounts on the host.
+fn apply_mounts(chroot_path: &str, mounts: &[MountSpec]) -> std::result::Result<(), String> {
+    let slash = CString::new("/").unwrap();
+    let ret = unsafe {
+        libc::mount(
+            slash.as_ptr(),
+            slash.as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        )
+    };
+    if ret != 0 {
+        return Err(format!(
+            "private mount propagation: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    struct PreparedBind {
+        fd: i32,
+        is_dir: bool,
+    }
+
+    let mut prepared: Vec<Option<PreparedBind>> = Vec::with_capacity(mounts.len());
+    for spec in mounts {
+        match &spec.source {
+            MountSource::Tmpfs => prepared.push(None),
+            MountSource::Bind(source) => {
+                let path = CString::new(source.as_os_str().as_bytes())
+                    .map_err(|_| format!("bind source contains NUL: {}", source.display()))?;
+                // O_PATH opens a file or directory without read access.
+                let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+                if fd < 0 {
+                    return Err(format!(
+                        "open bind source {}: {}",
+                        source.display(),
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                let is_dir = std::fs::metadata(source)
+                    .map(|meta| meta.is_dir())
+                    .unwrap_or(false);
+                prepared.push(Some(PreparedBind { fd, is_dir }));
+            }
+        }
+    }
+
+    let result = (|| -> std::result::Result<(), String> {
+        for (spec, entry) in mounts.iter().zip(prepared.iter()) {
+            let dest = format!("{}{}", chroot_path.trim_end_matches('/'), spec.target);
+            let target = CString::new(dest.as_str())
+                .map_err(|_| format!("mount target contains NUL: {}", dest))?;
+
+            match entry {
+                None => {
+                    std::fs::create_dir_all(&dest)
+                        .map_err(|e| format!("mkdir {}: {}", dest, e))?;
+                    let fstype = CString::new("tmpfs").unwrap();
+                    let data = CString::new("mode=0755,size=4m").unwrap();
+                    let ret = unsafe {
+                        libc::mount(
+                            fstype.as_ptr(),
+                            target.as_ptr(),
+                            fstype.as_ptr(),
+                            libc::MS_NOSUID | libc::MS_NODEV,
+                            data.as_ptr() as *const libc::c_void,
+                        )
+                    };
+                    if ret != 0 {
+                        return Err(format!(
+                            "tmpfs at {}: {}",
+                            spec.target,
+                            std::io::Error::last_os_error()
+                        ));
+                    }
+                }
+                Some(bind) => {
+                    if bind.is_dir {
+                        std::fs::create_dir_all(&dest)
+                            .map_err(|e| format!("mkdir {}: {}", dest, e))?;
+                    } else {
+                        if let Some(parent) = Path::new(&dest).parent() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+                        }
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .open(&dest)
+                            .map_err(|e| format!("create mount target {}: {}", dest, e))?;
+                    }
+                    let source = CString::new(format!("/proc/self/fd/{}", bind.fd)).unwrap();
+                    let bind_flags = libc::MS_BIND
+                        | if bind.is_dir { libc::MS_REC } else { 0 };
+                    let ret = unsafe {
+                        libc::mount(
+                            source.as_ptr(),
+                            target.as_ptr(),
+                            std::ptr::null(),
+                            bind_flags,
+                            std::ptr::null(),
+                        )
+                    };
+                    if ret != 0 {
+                        return Err(format!(
+                            "bind at {}: {}",
+                            spec.target,
+                            std::io::Error::last_os_error()
+                        ));
+                    }
+                    if spec.read_only {
+                        let remount_flags = libc::MS_BIND
+                            | libc::MS_REMOUNT
+                            | libc::MS_RDONLY
+                            | if bind.is_dir { libc::MS_REC } else { 0 };
+                        let ret = unsafe {
+                            libc::mount(
+                                std::ptr::null(),
+                                target.as_ptr(),
+                                std::ptr::null(),
+                                remount_flags,
+                                std::ptr::null(),
+                            )
+                        };
+                        if ret != 0 {
+                            return Err(format!(
+                                "read-only remount at {}: {}",
+                                spec.target,
+                                std::io::Error::last_os_error()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    for bind in prepared.into_iter().flatten() {
+        unsafe { libc::close(bind.fd) };
+    }
+    result
+}
+
 /// Wait for child process and get exit status
 fn wait_for_child(pid: Pid) -> Result<i32> {
     use nix::sys::wait::{WaitStatus, waitpid};
@@ -601,6 +835,40 @@ fn wait_for_child(pid: Pid) -> Result<i32> {
 mod tests {
     use super::*;
     use nix::unistd::{ForkResult, fork};
+
+    #[test]
+    fn mount_spec_validates_shape() {
+        let bind = |target: &str, source: &str| MountSpec {
+            source: MountSource::Bind(PathBuf::from(source)),
+            target: target.to_string(),
+            read_only: false,
+        };
+        assert!(bind("/collections", "/srv/root/collections").validate().is_ok());
+        assert!(bind("/collections/acme", "/srv/root/collections/acme").validate().is_ok());
+        // Relative targets, root, dot components and NUL are refused.
+        assert!(bind("collections", "/srv/root/collections").validate().is_err());
+        assert!(bind("/", "/srv/root").validate().is_err());
+        assert!(bind("/collections/../secret", "/srv/root").validate().is_err());
+        assert!(bind("/collections/./acme", "/srv/root").validate().is_err());
+        assert!(bind("/collections", "srv/root").validate().is_err());
+        // A tmpfs is writable by construction — read-only is a contradiction.
+        let tmpfs = MountSpec {
+            source: MountSource::Tmpfs,
+            target: "/collections".to_string(),
+            read_only: true,
+        };
+        assert!(tmpfs.validate().is_err());
+        let tmpfs = MountSpec {
+            read_only: false,
+            ..tmpfs
+        };
+        assert!(tmpfs.validate().is_ok());
+    }
+
+    #[test]
+    fn process_config_defaults_to_no_mount_plan() {
+        assert!(ProcessConfig::default().mounts.is_empty());
+    }
 
     #[test]
     fn test_process_config_default() {

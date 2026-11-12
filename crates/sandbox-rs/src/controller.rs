@@ -16,7 +16,7 @@ use sandbox_namespace::NamespaceConfig;
 use sandbox_seccomp::{SeccompFilter, SeccompProfile};
 
 use crate::execution::ProcessStream;
-use crate::execution::process::{ProcessConfig, ProcessExecutor};
+use crate::execution::process::{MountSpec, ProcessConfig, ProcessExecutor};
 
 /// Sandbox configuration
 #[derive(Debug, Clone)]
@@ -45,6 +45,9 @@ pub struct SandboxConfig {
     pub host_uid: Option<u32>,
     /// Host GID to map inside user namespace (None = use current process gid)
     pub host_gid: Option<u32>,
+    /// Ordered mount plan applied inside the sandbox's private mount
+    /// namespace, before chroot. Empty = historical behavior.
+    pub mounts: Vec<MountSpec>,
 }
 
 impl Default for SandboxConfig {
@@ -62,6 +65,7 @@ impl Default for SandboxConfig {
             privilege_mode: PrivilegeMode::Auto,
             host_uid: None,
             host_gid: None,
+            mounts: Vec::new(),
         }
     }
 }
@@ -99,6 +103,10 @@ impl SandboxConfig {
             return Err(SandboxError::InvalidConfig(
                 "Sandbox ID cannot be empty".to_string(),
             ));
+        }
+
+        for mount in &self.mounts {
+            mount.validate().map_err(SandboxError::InvalidConfig)?;
         }
 
         if self.namespace_config.enabled_count() == 0 {
@@ -203,7 +211,15 @@ impl SandboxBuilder {
         self.config.host_gid = Some(gid);
         self
     }
-    
+
+    /// Set the ordered mount plan applied inside the sandbox's private mount
+    /// namespace before chroot. Targets are sandbox-absolute; a failed mount
+    /// aborts every execution (it never falls back to the unfiltered root).
+    pub fn mounts(mut self, mounts: Vec<MountSpec>) -> Self {
+        self.config.mounts = mounts;
+        self
+    }
+
     /// Build sandbox
     pub fn build(self) -> Result<Sandbox> {
         self.config.validate()?;
@@ -339,7 +355,8 @@ impl Sandbox {
             inherit_env: true,
             use_user_namespace: self.config.namespace_config.user,
             host_uid: self.config.host_uid,
-            host_gid: self.config.host_gid,            
+            host_gid: self.config.host_gid,
+            mounts: self.config.mounts.clone(),
         }
     }
 
