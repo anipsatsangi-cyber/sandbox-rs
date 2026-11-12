@@ -8,5 +8,5 @@ pub mod process;
 pub mod stream;
 
 pub use init::SandboxInit;
-pub use process::{ProcessConfig, ProcessExecutor, ProcessResult};
+pub use process::{MountSource, MountSpec, ProcessConfig, ProcessExecutor, ProcessResult};
 pub use stream::{ProcessStream, StreamChunk};

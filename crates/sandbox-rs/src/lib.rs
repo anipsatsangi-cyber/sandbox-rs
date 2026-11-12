@@ -48,7 +48,9 @@ pub use sandbox_namespace::{NamespaceConfig, NamespaceType};
 pub use sandbox_seccomp::{SeccompBpf, SeccompFilter, SeccompProfile};
 
 pub use controller::{Sandbox, SandboxBuilder, SandboxConfig, SandboxResult};
-pub use execution::{ProcessConfig, ProcessResult, ProcessStream, StreamChunk};
+pub use execution::{
+    MountSource, MountSpec, ProcessConfig, ProcessResult, ProcessStream, StreamChunk,
+};
 pub use monitoring::{ProcessMonitor, ProcessState, ProcessStats};
 
 /// Alias for backwards compatibility
